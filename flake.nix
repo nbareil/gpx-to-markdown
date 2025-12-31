@@ -28,6 +28,10 @@
               watchman
               git
               amp-cli
+              python3
+              python3Packages.click
+              python3Packages.gpxpy
+              python3Packages.requests
             ]) ++ [ bd codexCli ];
 
           shellHook = ''
