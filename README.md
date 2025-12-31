@@ -1,13 +1,14 @@
 # GPX to Markdown
 
-Convert a mountain bike GPX track into French Markdown artifacts (turns, climbs, pauses, and POIs) enriched with OpenStreetMap via OSRM and Overpass.
+Convert a mountain bike GPX track into French Markdown artifacts (summary, turns, climbs, pauses, and POIs) enriched with OpenStreetMap via OSRM and Overpass.
 
 ## Features
 
 - OSRM map matching for road/trail names
 - POI enrichment from OSM (villages, peaks, churches, rivers, lakes, forests, windmills, power lines, rails, bridges, tunnels, roads, fields)
+- Human-friendly summary mode (polyline simplification + turn clustering)
 - Turn detection (angle > 80°)
-- Climb detection (>= 7% grade, estimated duration > 5 minutes at 8 km/h)
+- Climb detection (>= 4% grade, estimated duration > 3 minutes at 8 km/h)
 - Pause detection (speed ~0 for > 5 minutes)
 - Output in French Markdown with km and timestamps
 
@@ -36,8 +37,12 @@ python gpx_to_markdown.py path/to/track.gpx --output summary.md
 - `--osrm-profile` (default: `driving`)
 - `--overpass-url` (default: `https://overpass-api.de/api/interpreter`)
 - `--turn-angle` (default: `80`)
-- `--min-grade` (default: `7`)
-- `--climb-min-minutes` (default: `5`)
+- `--min-grade` (default: `4`)
+- `--climb-min-minutes` (default: `3`)
+- `--verbosity` (default: `human`, or `detailed`)
+- `--simplify-tolerance` (default: `20`)
+- `--turn-min-spacing` (default: `120`)
+- `--turn-cluster-radius` (default: `200`)
 - `--poi-radius` (default: `100`)
 - `--osrm-max-points` (default: `1000`)
 - `--output` (default: stdout)

@@ -263,20 +263,7 @@ def detect_climbs(
     distance_scale: float,
 ) -> List[Event]:
     events: List[Event] = []
-    smooth_window = max(1, elevation_smooth)
-    half_window = smooth_window // 2
-    elevations: List[Optional[float]] = [p.ele for p in points]
-    if smooth_window > 1:
-        smoothed: List[Optional[float]] = []
-        for i in range(len(elevations)):
-            start = max(0, i - half_window)
-            end = min(len(elevations), i + half_window + 1)
-            window_vals = [v for v in elevations[start:end] if v is not None]
-            if window_vals:
-                smoothed.append(sum(window_vals) / len(window_vals))
-            else:
-                smoothed.append(None)
-        elevations = smoothed
+    elevations = smooth_elevations([p.ele for p in points], elevation_smooth)
     in_climb = False
     start_idx = 0
     total_dist = 0.0
@@ -447,6 +434,24 @@ def point_to_polyline_distance_m(point: Tuple[float, float], polyline: List[Tupl
     return min_dist
 
 
+def point_segment_distance_xy(
+    px: float,
+    py: float,
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+) -> float:
+    dx = bx - ax
+    dy = by - ay
+    if dx == 0 and dy == 0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    proj_x = ax + t * dx
+    proj_y = ay + t * dy
+    return math.hypot(px - proj_x, py - proj_y)
+
+
 def project_distance_on_polyline(
     point: Tuple[float, float], polyline: List[Tuple[float, float]], distances: List[float]
 ) -> float:
@@ -474,6 +479,34 @@ def project_distance_on_polyline(
             best_dist = proj_dist
             best_pos = distances[i] + frac * (distances[i + 1] - distances[i])
     return best_pos
+
+
+def simplify_polyline_indices(polyline: List[Tuple[float, float]], tolerance_m: float) -> List[int]:
+    if len(polyline) < 3 or tolerance_m <= 0:
+        return list(range(len(polyline)))
+    origin_lat = sum(lat for lat, _ in polyline) / len(polyline)
+    xy = [to_xy(lat, lon, origin_lat) for lat, lon in polyline]
+    keep = [False] * len(polyline)
+    keep[0] = True
+    keep[-1] = True
+    stack = [(0, len(polyline) - 1)]
+    while stack:
+        start, end = stack.pop()
+        ax, ay = xy[start]
+        bx, by = xy[end]
+        max_dist = 0.0
+        index = None
+        for i in range(start + 1, end):
+            px, py = xy[i]
+            dist = point_segment_distance_xy(px, py, ax, ay, bx, by)
+            if dist > max_dist:
+                max_dist = dist
+                index = i
+        if index is not None and max_dist > tolerance_m:
+            keep[index] = True
+            stack.append((start, index))
+            stack.append((index, end))
+    return [i for i, flag in enumerate(keep) if flag]
 
 
 def time_at_distance(distances: List[float], times: List[Optional[dt.datetime]], target: float) -> Optional[dt.datetime]:
@@ -515,6 +548,120 @@ def format_time_range(start: Optional[dt.datetime], end: Optional[dt.datetime]) 
     if start.date() == end.date():
         return f"{start.strftime('%Y-%m-%d %H:%M')}–{end.strftime('%H:%M')}"
     return f"{format_time(start)}–{format_time(end)}"
+
+
+def smooth_elevations(elevations: List[Optional[float]], window: int) -> List[Optional[float]]:
+    smooth_window = max(1, window)
+    half_window = smooth_window // 2
+    if smooth_window <= 1:
+        return elevations
+    smoothed: List[Optional[float]] = []
+    for i in range(len(elevations)):
+        start = max(0, i - half_window)
+        end = min(len(elevations), i + half_window + 1)
+        window_vals = [v for v in elevations[start:end] if v is not None]
+        if window_vals:
+            smoothed.append(sum(window_vals) / len(window_vals))
+        else:
+            smoothed.append(None)
+    return smoothed
+
+
+def total_elevation_gain_loss(
+    points: List[TrackPoint], elevation_smooth: int
+) -> Tuple[float, float, Optional[float]]:
+    elevations = smooth_elevations([p.ele for p in points], elevation_smooth)
+    gain = 0.0
+    loss = 0.0
+    max_ele = None
+    for e1, e2 in zip(elevations, elevations[1:]):
+        if e1 is None or e2 is None:
+            continue
+        if max_ele is None or e2 > max_ele:
+            max_ele = e2
+        delta = e2 - e1
+        if delta > 0:
+            gain += delta
+        elif delta < 0:
+            loss += -delta
+    return gain, loss, max_ele
+
+
+def format_duration(seconds: float) -> str:
+    if seconds <= 0:
+        return "0 min"
+    hours = int(seconds // 3600)
+    minutes = int(round((seconds % 3600) / 60))
+    if minutes == 60:
+        hours += 1
+        minutes = 0
+    if hours > 0:
+        return f"{hours:d} h {minutes:02d} min"
+    return f"{minutes:d} min"
+
+
+def summarize_track(points: List[TrackPoint], distances: List[float], elevation_smooth: int) -> str:
+    total_km = distances[-1] / 1000.0 if distances else 0.0
+    gain, loss, max_ele = total_elevation_gain_loss(points, elevation_smooth)
+    parts = [f"Distance {total_km:.1f} km", f"D+ {gain:.0f} m", f"D- {loss:.0f} m"]
+    if max_ele is not None:
+        parts.append(f"Alt max {max_ele:.0f} m")
+    if points and points[0].time and points[-1].time:
+        total_seconds = (points[-1].time - points[0].time).total_seconds()
+        parts.append(f"Temps {format_duration(total_seconds)}")
+    return " \u00b7 ".join(parts)
+
+
+def turn_direction(description: str) -> Optional[str]:
+    text = description.lower()
+    if "gauche" in text:
+        return "gauche"
+    if "droite" in text:
+        return "droite"
+    return None
+
+
+def cluster_turn_events(events: List[Event], cluster_radius_m: float, min_cluster_size: int = 3) -> List[Event]:
+    if not events or cluster_radius_m <= 0:
+        return events
+    clustered: List[Event] = []
+    i = 0
+    while i < len(events):
+        start = events[i]
+        cluster = [start]
+        j = i + 1
+        while j < len(events) and events[j].distance_m - start.distance_m <= cluster_radius_m:
+            cluster.append(events[j])
+            j += 1
+        if len(cluster) >= min_cluster_size:
+            directions = [turn_direction(e.description) for e in cluster]
+            left = sum(1 for d in directions if d == "gauche")
+            right = sum(1 for d in directions if d == "droite")
+            if left and right:
+                detail = f"Enchaînement de {len(cluster)} virages"
+            elif left:
+                detail = f"Série de {len(cluster)} virages à gauche"
+            elif right:
+                detail = f"Série de {len(cluster)} virages à droite"
+            else:
+                detail = f"Enchaînement de {len(cluster)} virages"
+            clustered.append(Event(distance_m=start.distance_m, description=detail))
+        else:
+            clustered.extend(cluster)
+        i = j
+    return clustered
+
+
+def filter_turn_events(events: List[Event], min_spacing_m: float) -> List[Event]:
+    if not events or min_spacing_m <= 0:
+        return events
+    filtered: List[Event] = []
+    last_distance = None
+    for event in events:
+        if last_distance is None or event.distance_m - last_distance >= min_spacing_m:
+            filtered.append(event)
+            last_distance = event.distance_m
+    return filtered
 
 
 def format_event(event: Event, total_distances: List[float], times: List[Optional[dt.datetime]]) -> str:
@@ -917,6 +1064,15 @@ def extract_overpass_step_names(
     default="overpass",
     show_default=True,
 )
+@click.option(
+    "--verbosity",
+    type=click.Choice(["human", "detailed"]),
+    default="human",
+    show_default=True,
+)
+@click.option("--simplify-tolerance", default=20.0, show_default=True, type=float)
+@click.option("--turn-min-spacing", default=120.0, show_default=True, type=float)
+@click.option("--turn-cluster-radius", default=200.0, show_default=True, type=float)
 @click.option("--output", type=click.Path(dir_okay=False, path_type=Path))
 def main(
     gpx_path: Path,
@@ -935,6 +1091,10 @@ def main(
     osrm_debug: bool,
     overpass_debug: bool,
     name_source: str,
+    verbosity: str,
+    simplify_tolerance: float,
+    turn_min_spacing: float,
+    turn_cluster_radius: float,
     output: Optional[Path],
 ) -> None:
     points = load_gpx_points(gpx_path)
@@ -969,9 +1129,17 @@ def main(
         )
 
     events: List[Event] = []
-    for event in detect_turns(match_polyline, match_distances, turn_angle, steps):
+    turn_polyline = match_polyline
+    turn_distances = match_distances
+    if verbosity == "human":
+        indices = simplify_polyline_indices(match_polyline, simplify_tolerance)
+        turn_polyline = [match_polyline[i] for i in indices]
+        turn_distances = [match_distances[i] for i in indices]
+
+    scaled_turns: List[Event] = []
+    for event in detect_turns(turn_polyline, turn_distances, turn_angle, steps):
         raw_distance = event.distance_m / distance_scale if distance_scale else event.distance_m
-        events.append(
+        scaled_turns.append(
             Event(
                 distance_m=raw_distance,
                 description=event.description,
@@ -981,6 +1149,10 @@ def main(
                 time_end=event.time_end,
             )
         )
+    if verbosity == "human":
+        scaled_turns = cluster_turn_events(scaled_turns, turn_cluster_radius)
+        scaled_turns = filter_turn_events(scaled_turns, turn_min_spacing)
+    events.extend(scaled_turns)
     events.extend(
         detect_climbs(
             points,
@@ -1009,7 +1181,11 @@ def main(
 
     events.sort(key=lambda e: e.distance_m)
     output_lines = [format_event(event, raw_distances, times) for event in events]
-    content = "\n".join(output_lines)
+    if verbosity == "human":
+        summary_line = summarize_track(points, raw_distances, elevation_smooth)
+        content = summary_line + "\n\n" + "\n".join(output_lines)
+    else:
+        content = "\n".join(output_lines)
     if output:
         output.write_text(content + "\n", encoding="utf-8")
     else:
