@@ -1,3 +1,7 @@
 .gpx_to_markdown_cache.json
 __pycache__/
 *.pyc
+.venv/
+venv/
+env/
+.env
