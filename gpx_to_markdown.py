@@ -103,16 +103,49 @@ def sample_points(points: List[TrackPoint], max_points: int) -> List[TrackPoint]
     return sampled
 
 
-def request_json(url: str, params: Dict[str, str], timeout: int = 30) -> Optional[Dict]:
+def request_json(
+    url: str,
+    params: Dict[str, str],
+    timeout: int = 30,
+    debug: bool = False,
+    label: str = "",
+    headers: Optional[Dict[str, str]] = None,
+    method: str = "get",
+) -> Optional[Dict]:
     try:
-        response = requests.get(url, params=params, timeout=timeout)
-    except requests.RequestException:
+        if method == "post":
+            response = requests.post(url, data=params, timeout=timeout, headers=headers)
+        else:
+            response = requests.get(url, params=params, timeout=timeout, headers=headers)
+    except requests.RequestException as exc:
+        if debug:
+            prefix = f"{label} " if label else ""
+            click.echo(f"{prefix}request failed: {exc}", err=True)
         return None
     if response.status_code != 200:
+        if debug:
+            prefix = f"{label} " if label else ""
+            detail = response.text.strip().replace("\n", " ")
+            limit = 1200 if label.lower() == "overpass" else 300
+            if len(detail) > limit:
+                detail = f"{detail[:limit]}..."
+            if detail:
+                click.echo(
+                    f"{prefix}HTTP {response.status_code} for {response.url}: {detail}", err=True
+                )
+            else:
+                click.echo(f"{prefix}HTTP {response.status_code} for {response.url}", err=True)
         return None
     try:
         return response.json()
     except ValueError:
+        if debug:
+            prefix = f"{label} " if label else ""
+            detail = response.text.strip().replace("\n", " ")
+            limit = 1200 if label.lower() == "overpass" else 300
+            if len(detail) > limit:
+                detail = f"{detail[:limit]}..."
+            click.echo(f"{prefix}invalid JSON from {response.url}: {detail}", err=True)
         return None
 
 
@@ -121,6 +154,7 @@ def osrm_match(
     osrm_url: str,
     profile: str,
     max_points: int,
+    debug: bool,
 ) -> Optional[Dict]:
     candidates = []
     if len(points) <= max_points:
@@ -145,7 +179,7 @@ def osrm_match(
             "steps": "true",
             "annotations": "false",
         }
-        data = request_json(url, params=params)
+        data = request_json(url, params=params, debug=debug, label="OSRM")
         if data and data.get("matchings"):
             return data
     return None
@@ -224,10 +258,25 @@ def detect_climbs(
     distances: List[float],
     min_grade: float,
     min_minutes: float,
+    elevation_smooth: int,
     steps: List[StepName],
     distance_scale: float,
 ) -> List[Event]:
     events: List[Event] = []
+    smooth_window = max(1, elevation_smooth)
+    half_window = smooth_window // 2
+    elevations: List[Optional[float]] = [p.ele for p in points]
+    if smooth_window > 1:
+        smoothed: List[Optional[float]] = []
+        for i in range(len(elevations)):
+            start = max(0, i - half_window)
+            end = min(len(elevations), i + half_window + 1)
+            window_vals = [v for v in elevations[start:end] if v is not None]
+            if window_vals:
+                smoothed.append(sum(window_vals) / len(window_vals))
+            else:
+                smoothed.append(None)
+        elevations = smoothed
     in_climb = False
     start_idx = 0
     total_dist = 0.0
@@ -235,13 +284,15 @@ def detect_climbs(
     for i in range(len(points) - 1):
         p1 = points[i]
         p2 = points[i + 1]
+        e1 = elevations[i]
+        e2 = elevations[i + 1]
         seg_dist = haversine_m(p1.lat, p1.lon, p2.lat, p2.lon)
-        if seg_dist <= 0 or p1.ele is None or p2.ele is None:
+        if seg_dist <= 0 or e1 is None or e2 is None:
             grade = 0.0
         else:
-            elev_diff = p2.ele - p1.ele
+            elev_diff = e2 - e1
             grade = (elev_diff / seg_dist) * 100.0
-        uphill = seg_dist > 0 and p1.ele is not None and p2.ele is not None and (p2.ele - p1.ele) > 0
+        uphill = seg_dist > 0 and e1 is not None and e2 is not None and (e2 - e1) > 0
         if uphill and grade >= min_grade:
             if not in_climb:
                 in_climb = True
@@ -249,7 +300,7 @@ def detect_climbs(
                 total_dist = 0.0
                 total_gain = 0.0
             total_dist += seg_dist
-            total_gain += max(0.0, (p2.ele or 0.0) - (p1.ele or 0.0))
+            total_gain += max(0.0, (e2 or 0.0) - (e1 or 0.0))
         else:
             if in_climb:
                 events.extend(
@@ -500,47 +551,160 @@ def save_overpass_cache(cache: Dict[str, Dict]) -> None:
     path.write_text(json.dumps(cache), encoding="utf-8")
 
 
+def overpass_query_text(
+    bbox: Tuple[float, float, float, float],
+    timeout_s: int,
+    include_highways: bool,
+    include_pois: bool,
+) -> str:
+    south, west, north, east = bbox
+    selectors: List[str] = []
+    if include_pois:
+        selectors.extend(
+            [
+                'nwr[place~"^(city|town|village|hamlet)$"]',
+                "nwr[natural=peak]",
+                "nwr[amenity=place_of_worship][religion=christian]",
+                "nwr[building=church]",
+                "nwr[waterway=river]",
+                "nwr[waterway=stream]",
+                "nwr[waterway=waterfall]",
+                "nwr[natural=waterfall]",
+                "nwr[natural=water][water=lake]",
+                "nwr[water=lake]",
+                "nwr[natural=cave_entrance]",
+                "nwr[natural=gorge]",
+                "nwr[historic=ruins]",
+                "nwr[building=ruins]",
+                "nwr[ruins=yes]",
+                "nwr[building=chapel]",
+                "nwr[amenity=place_of_worship][place_of_worship=chapel]",
+                "nwr[historic=monument]",
+                "nwr[historic=memorial]",
+                "nwr[memorial]",
+                "nwr[landuse=farmyard]",
+                "nwr[building=farm]",
+                "nwr[amenity=farm]",
+                "nwr[landuse=pasture]",
+                "nwr[livestock]",
+                "nwr[animal]",
+                "nwr[landuse=forest]",
+                "nwr[natural=wood]",
+                "nwr[landuse=farmland]",
+                "nwr[landuse=meadow]",
+                "nwr[man_made=windmill]",
+                'nwr[power=generator]["generator:source"=wind]',
+                "nwr[power=line]",
+                "nwr[power=minor_line]",
+                "nwr[railway=rail]",
+                "nwr[bridge=yes]",
+                "nwr[man_made=bridge]",
+                "nwr[tunnel=yes]",
+            ]
+        )
+    if include_highways:
+        selectors.extend(
+            [
+                "nwr[highway][name]",
+                "nwr[highway][ref]",
+            ]
+        )
+    if not selectors:
+        return ""
+    selector_lines = "\n".join(
+        f"      {selector}({south},{west},{north},{east});" for selector in selectors
+    )
+    return f"""
+    [out:json][timeout:{timeout_s}];
+    (
+{selector_lines}
+    );
+    out center tags;
+    """
+
+
 def overpass_query(
     bbox: Tuple[float, float, float, float],
     overpass_url: str,
     cache: Dict[str, Dict],
+    timeout: int = 90,
+    split_on_fail: bool = True,
+    debug: bool = False,
+    include_highways: bool = True,
+    include_pois: bool = True,
 ) -> Optional[Dict]:
-    south, west, north, east = bbox
-    query = f"""
-    [out:json][timeout:25];
-    (
-      nwr[place~"^(city|town|village|hamlet)$"]({south},{west},{north},{east});
-      nwr[natural=peak]({south},{west},{north},{east});
-      nwr[amenity=place_of_worship][religion=christian]({south},{west},{north},{east});
-      nwr[building=church]({south},{west},{north},{east});
-      nwr[waterway=river]({south},{west},{north},{east});
-      nwr[waterway=stream]({south},{west},{north},{east});
-      nwr[natural=water][water=lake]({south},{west},{north},{east});
-      nwr[water=lake]({south},{west},{north},{east});
-      nwr[landuse=forest]({south},{west},{north},{east});
-      nwr[natural=wood]({south},{west},{north},{east});
-      nwr[landuse=farmland]({south},{west},{north},{east});
-      nwr[landuse=meadow]({south},{west},{north},{east});
-      nwr[man_made=windmill]({south},{west},{north},{east});
-      nwr[power=generator][generator:source=wind]({south},{west},{north},{east});
-      nwr[power=line]({south},{west},{north},{east});
-      nwr[power=minor_line]({south},{west},{north},{east});
-      nwr[railway=rail]({south},{west},{north},{east});
-      nwr[highway][name]({south},{west},{north},{east});
-      nwr[highway][ref]({south},{west},{north},{east});
-      nwr[bridge=yes]({south},{west},{north},{east});
-      nwr[man_made=bridge]({south},{west},{north},{east});
-      nwr[tunnel=yes]({south},{west},{north},{east});
-    );
-    out center tags;
-    """
+    query = overpass_query_text(bbox, timeout, include_highways, include_pois)
+    if not query:
+        return None
     key = hashlib.sha256(query.encode("utf-8")).hexdigest()
     if key in cache:
+        if debug:
+            click.echo("Overpass cache hit.", err=True)
         return cache[key]
-    data = request_json(overpass_url, params={"data": query}, timeout=60)
+    if debug:
+        south, west, north, east = bbox
+        click.echo(
+            f"Overpass bbox: south={south:.6f} west={west:.6f} north={north:.6f} east={east:.6f}",
+            err=True,
+        )
+    headers = {"User-Agent": "gpx-to-markdown/1.0"}
+    data = request_json(
+        overpass_url,
+        params={"data": query},
+        timeout=timeout,
+        debug=debug,
+        label="Overpass",
+        headers=headers,
+        method="post",
+    )
     if data:
+        if debug:
+            count = len(data.get("elements", []))
+            click.echo(f"Overpass returned {count} elements.", err=True)
         cache[key] = data
-    return data
+        return data
+    elif debug:
+        click.echo("Overpass request failed or returned no data.", err=True)
+    if not split_on_fail:
+        return None
+    if debug:
+        click.echo("Overpass split retry (2x2).", err=True)
+    south, west, north, east = bbox
+    mid_lat = (south + north) / 2.0
+    mid_lon = (west + east) / 2.0
+    tiles = [
+        (south, west, mid_lat, mid_lon),
+        (south, mid_lon, mid_lat, east),
+        (mid_lat, west, north, mid_lon),
+        (mid_lat, mid_lon, north, east),
+    ]
+    merged: Dict[str, Dict] = {"elements": []}
+    seen = set()
+    for tile in tiles:
+        tile_data = overpass_query(
+            tile,
+            overpass_url,
+            cache,
+            timeout=timeout,
+            split_on_fail=False,
+            debug=debug,
+            include_highways=include_highways,
+            include_pois=include_pois,
+        )
+        if not tile_data:
+            continue
+        for element in tile_data.get("elements", []):
+            element_id = (element.get("type"), element.get("id"))
+            if element_id in seen:
+                continue
+            seen.add(element_id)
+            merged["elements"].append(element)
+    if merged["elements"]:
+        if debug:
+            click.echo(f"Overpass merged {len(merged['elements'])} elements.", err=True)
+        cache[key] = merged
+        return merged
+    return None
 
 
 def poi_label(tags: Dict[str, str]) -> Optional[str]:
@@ -557,10 +721,26 @@ def poi_label(tags: Dict[str, str]) -> Optional[str]:
         return "la rivière"
     if tags.get("waterway") == "stream":
         return "le ruisseau"
+    if tags.get("waterway") == "waterfall" or tags.get("natural") == "waterfall":
+        return "la cascade"
     if tags.get("natural") == "water" and tags.get("water") == "lake":
         return "le lac"
     if tags.get("water") == "lake":
         return "le lac"
+    if tags.get("natural") == "cave_entrance":
+        return "la grotte"
+    if tags.get("natural") == "gorge":
+        return "la gorge"
+    if tags.get("historic") == "ruins" or tags.get("building") == "ruins" or tags.get("ruins") == "yes":
+        return "les ruines"
+    if tags.get("building") == "chapel" or tags.get("place_of_worship") == "chapel":
+        return "la chapelle"
+    if tags.get("historic") in {"monument", "memorial"} or tags.get("memorial"):
+        return "le monument"
+    if tags.get("landuse") == "farmyard" or tags.get("building") == "farm" or tags.get("amenity") == "farm":
+        return "la ferme"
+    if tags.get("landuse") == "pasture" or tags.get("livestock") or tags.get("animal"):
+        return "le pâturage"
     if tags.get("landuse") == "forest" or tags.get("natural") == "wood":
         return "la forêt"
     if tags.get("landuse") in {"farmland", "meadow"}:
@@ -574,7 +754,7 @@ def poi_label(tags: Dict[str, str]) -> Optional[str]:
     if tags.get("railway") == "rail":
         return "la voie ferrée"
     highway = tags.get("highway")
-    if highway:
+    if highway and (tags.get("name") or tags.get("ref")):
         if highway in {"path", "track", "footway", "bridleway", "cycleway"}:
             return "le chemin"
         return "la route"
@@ -590,6 +770,9 @@ def extract_pois(
     match_distances: List[float],
     poi_radius_m: float,
     overpass_url: str,
+    overpass_timeout: int = 90,
+    overpass_split: bool = True,
+    debug: bool = False,
 ) -> List[Tuple[float, str]]:
     if not match_polyline:
         return []
@@ -600,7 +783,16 @@ def extract_pois(
     delta_lon = poi_radius_m / (M_PER_DEG * math.cos(math.radians(mean_lat)))
     bbox = (min(lats) - delta_lat, min(lons) - delta_lon, max(lats) + delta_lat, max(lons) + delta_lon)
     cache = load_overpass_cache()
-    data = overpass_query(bbox, overpass_url, cache)
+    data = overpass_query(
+        bbox,
+        overpass_url,
+        cache,
+        timeout=overpass_timeout,
+        split_on_fail=overpass_split,
+        debug=debug,
+        include_highways=False,
+        include_pois=True,
+    )
     if data:
         save_overpass_cache(cache)
     if not data:
@@ -637,16 +829,94 @@ def extract_pois(
     return features
 
 
+def extract_overpass_step_names(
+    match_polyline: List[Tuple[float, float]],
+    match_distances: List[float],
+    road_radius_m: float,
+    overpass_url: str,
+    overpass_timeout: int = 90,
+    overpass_split: bool = True,
+    debug: bool = False,
+) -> List[StepName]:
+    if not match_polyline:
+        return []
+    lats = [lat for lat, _ in match_polyline]
+    lons = [lon for _, lon in match_polyline]
+    mean_lat = sum(lats) / len(lats)
+    delta_lat = road_radius_m / M_PER_DEG
+    delta_lon = road_radius_m / (M_PER_DEG * math.cos(math.radians(mean_lat)))
+    bbox = (min(lats) - delta_lat, min(lons) - delta_lon, max(lats) + delta_lat, max(lons) + delta_lon)
+    cache = load_overpass_cache()
+    data = overpass_query(
+        bbox,
+        overpass_url,
+        cache,
+        timeout=overpass_timeout,
+        split_on_fail=overpass_split,
+        debug=debug,
+        include_highways=True,
+        include_pois=False,
+    )
+    if data:
+        save_overpass_cache(cache)
+    if not data:
+        return []
+    positions_by_name: Dict[str, List[float]] = {}
+    for element in data.get("elements", []):
+        tags = element.get("tags") or {}
+        if not tags.get("highway"):
+            continue
+        name = (tags.get("name") or tags.get("ref") or "").strip()
+        if not name:
+            continue
+        if "lat" in element and "lon" in element:
+            lat = element["lat"]
+            lon = element["lon"]
+        elif "center" in element:
+            lat = element["center"]["lat"]
+            lon = element["center"]["lon"]
+        else:
+            continue
+        distance = point_to_polyline_distance_m((lat, lon), match_polyline)
+        if distance > road_radius_m:
+            continue
+        position = project_distance_on_polyline((lat, lon), match_polyline, match_distances)
+        positions_by_name.setdefault(name, []).append(position)
+    steps: List[StepName] = []
+    for name, positions in positions_by_name.items():
+        start = min(positions)
+        end = max(positions)
+        steps.append(StepName(max(0.0, start - road_radius_m), end + road_radius_m, name))
+    if debug:
+        click.echo(
+            f"Overpass road names: {len(positions_by_name)} (radius {road_radius_m:.0f} m).",
+            err=True,
+        )
+    return sorted(steps, key=lambda step: step.start_m)
+
+
 @click.command()
 @click.argument("gpx_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--osrm-url", default="https://router.project-osrm.org", show_default=True)
 @click.option("--osrm-profile", default="driving", show_default=True)
 @click.option("--overpass-url", default="https://overpass-api.de/api/interpreter", show_default=True)
 @click.option("--turn-angle", default=80.0, show_default=True, type=float)
-@click.option("--min-grade", default=7.0, show_default=True, type=float)
-@click.option("--climb-min-minutes", default=5.0, show_default=True, type=float)
+@click.option("--min-grade", default=4.0, show_default=True, type=float)
+@click.option("--climb-min-minutes", default=3.0, show_default=True, type=float)
+@click.option("--elevation-smooth", default=5, show_default=True, type=int)
 @click.option("--poi-radius", default=100.0, show_default=True, type=float)
+@click.option("--road-radius", default=50.0, show_default=True, type=float)
+@click.option("--overpass-timeout", default=90, show_default=True, type=int)
+@click.option("--overpass-split/--no-overpass-split", default=True, show_default=True)
 @click.option("--osrm-max-points", default=1000, show_default=True, type=int)
+@click.option("--osrm-debug", is_flag=True, help="Print OSRM HTTP errors.")
+@click.option("--overpass-debug", is_flag=True, help="Print Overpass debug logs.")
+@click.option(
+    "--name-source",
+    type=click.Choice(["overpass", "osrm"]),
+    default="overpass",
+    show_default=True,
+)
 @click.option("--output", type=click.Path(dir_okay=False, path_type=Path))
 def main(
     gpx_path: Path,
@@ -656,8 +926,15 @@ def main(
     turn_angle: float,
     min_grade: float,
     climb_min_minutes: float,
+    elevation_smooth: int,
     poi_radius: float,
+    road_radius: float,
+    overpass_timeout: int,
+    overpass_split: bool,
     osrm_max_points: int,
+    osrm_debug: bool,
+    overpass_debug: bool,
+    name_source: str,
     output: Optional[Path],
 ) -> None:
     points = load_gpx_points(gpx_path)
@@ -665,18 +942,31 @@ def main(
     raw_distances = cumulative_distances(raw_coords)
     times = [p.time for p in points]
 
-    match_data = osrm_match(points, osrm_url, osrm_profile, osrm_max_points)
-    match_polyline = parse_match_geometry(match_data) if match_data else None
-    steps = parse_step_names(match_data) if match_data else []
-
-    if match_polyline:
-        match_distances = cumulative_distances(match_polyline)
-        distance_scale = match_distances[-1] / raw_distances[-1] if raw_distances[-1] else 1.0
+    if name_source == "osrm":
+        match_data = osrm_match(points, osrm_url, osrm_profile, osrm_max_points, osrm_debug)
+        match_polyline = parse_match_geometry(match_data) if match_data else None
+        steps = parse_step_names(match_data) if match_data else []
+        if match_polyline:
+            match_distances = cumulative_distances(match_polyline)
+            distance_scale = match_distances[-1] / raw_distances[-1] if raw_distances[-1] else 1.0
+        else:
+            click.echo("OSRM match failed; using raw geometry without road names.", err=True)
+            match_polyline = raw_coords
+            match_distances = raw_distances
+            distance_scale = 1.0
     else:
-        click.echo("OSRM match failed; using raw geometry without road names.", err=True)
         match_polyline = raw_coords
         match_distances = raw_distances
         distance_scale = 1.0
+        steps = extract_overpass_step_names(
+            match_polyline,
+            match_distances,
+            road_radius,
+            overpass_url,
+            overpass_timeout=overpass_timeout,
+            overpass_split=overpass_split,
+            debug=overpass_debug,
+        )
 
     events: List[Event] = []
     for event in detect_turns(match_polyline, match_distances, turn_angle, steps):
@@ -692,11 +982,27 @@ def main(
             )
         )
     events.extend(
-        detect_climbs(points, raw_distances, min_grade, climb_min_minutes, steps, distance_scale)
+        detect_climbs(
+            points,
+            raw_distances,
+            min_grade,
+            climb_min_minutes,
+            elevation_smooth,
+            steps,
+            distance_scale,
+        )
     )
     events.extend(detect_pauses(points, raw_distances, 5.0))
 
-    poi_entries = extract_pois(match_polyline, match_distances, poi_radius, overpass_url)
+    poi_entries = extract_pois(
+        match_polyline,
+        match_distances,
+        poi_radius,
+        overpass_url,
+        overpass_timeout=overpass_timeout,
+        overpass_split=overpass_split,
+        debug=overpass_debug,
+    )
     for position, description in poi_entries:
         scaled_position = position / distance_scale if distance_scale else position
         events.append(Event(distance_m=scaled_position, description=description))
