@@ -243,13 +243,13 @@ def detect_turns(
         delta = (b2 - b1 + 540.0) % 360.0 - 180.0
         if abs(delta) < turn_angle:
             continue
-        direction = "droite" if delta > 0 else "gauche"
+        direction = cardinal_direction(b2)
         angle = abs(delta)
         road_name = name_for_distance(steps, distances[i])
         if road_name:
-            detail = f'Tourner à {direction} sur "{road_name}" (≈{angle:.0f}°)'
+            detail = f'Direction {direction} sur "{road_name}" (≈{angle:.0f}°)'
         else:
-            detail = f"Tourner à {direction} (≈{angle:.0f}°)"
+            detail = f"Direction {direction} (≈{angle:.0f}°)"
         events.append(Event(distance_m=distances[i], description=detail))
     return events
 
@@ -625,6 +625,21 @@ def format_time_range(start: Optional[dt.datetime], end: Optional[dt.datetime]) 
     return f"{format_time(start)}–{format_time(end)}"
 
 
+def cardinal_direction(bearing: float) -> str:
+    directions = [
+        "nord",
+        "nord-est",
+        "est",
+        "sud-est",
+        "sud",
+        "sud-ouest",
+        "ouest",
+        "nord-ouest",
+    ]
+    idx = int((bearing + 22.5) // 45) % 8
+    return directions[idx]
+
+
 def smooth_elevations(elevations: List[Optional[float]], window: int) -> List[Optional[float]]:
     smooth_window = max(1, window)
     half_window = smooth_window // 2
@@ -687,15 +702,6 @@ def summarize_track(points: List[TrackPoint], distances: List[float], elevation_
     return " \u00b7 ".join(parts)
 
 
-def turn_direction(description: str) -> Optional[str]:
-    text = description.lower()
-    if "gauche" in text:
-        return "gauche"
-    if "droite" in text:
-        return "droite"
-    return None
-
-
 def cluster_turn_events(events: List[Event], cluster_radius_m: float, min_cluster_size: int = 3) -> List[Event]:
     if not events or cluster_radius_m <= 0:
         return events
@@ -709,17 +715,7 @@ def cluster_turn_events(events: List[Event], cluster_radius_m: float, min_cluste
             cluster.append(events[j])
             j += 1
         if len(cluster) >= min_cluster_size:
-            directions = [turn_direction(e.description) for e in cluster]
-            left = sum(1 for d in directions if d == "gauche")
-            right = sum(1 for d in directions if d == "droite")
-            if left and right:
-                detail = f"Enchaînement de {len(cluster)} virages"
-            elif left:
-                detail = f"Série de {len(cluster)} virages à gauche"
-            elif right:
-                detail = f"Série de {len(cluster)} virages à droite"
-            else:
-                detail = f"Enchaînement de {len(cluster)} virages"
+            detail = f"Enchaînement de {len(cluster)} changements de direction"
             clustered.append(Event(distance_m=start.distance_m, description=detail))
         else:
             clustered.extend(cluster)
