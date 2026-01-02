@@ -510,6 +510,80 @@ def simplify_polyline_indices(polyline: List[Tuple[float, float]], tolerance_m: 
     return [i for i, flag in enumerate(keep) if flag]
 
 
+def bresenham_line(x0: int, y0: int, x1: int, y1: int) -> Iterable[Tuple[int, int]]:
+    dx = abs(x1 - x0)
+    dy = -abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    x = x0
+    y = y0
+    while True:
+        yield x, y
+        if x == x1 and y == y1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x += sx
+        if e2 <= dx:
+            err += dx
+            y += sy
+
+
+def render_ascii(
+    points: List[TrackPoint],
+    width: int,
+    height: int,
+    path_char: str = "#",
+) -> str:
+    if not points:
+        return ""
+    width = max(10, width)
+    height = max(5, height)
+    origin_lat = sum(p.lat for p in points) / len(points)
+    xy = [to_xy(p.lat, p.lon, origin_lat) for p in points]
+    min_x = min(x for x, _ in xy)
+    max_x = max(x for x, _ in xy)
+    min_y = min(y for _, y in xy)
+    max_y = max(y for _, y in xy)
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    pad = max(span_x, span_y) * 0.05
+    min_x -= pad
+    max_x += pad
+    min_y -= pad
+    max_y += pad
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    if span_x == 0:
+        span_x = 1.0
+    if span_y == 0:
+        span_y = 1.0
+    scale = min((width - 1) / span_x, (height - 1) / span_y)
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+
+    def to_grid(x: float, y: float) -> Tuple[int, int]:
+        gx = int(round((x - min_x) * scale))
+        gy = int(round((max_y - y) * scale))
+        gx = max(0, min(width - 1, gx))
+        gy = max(0, min(height - 1, gy))
+        return gx, gy
+
+    for (x0, y0), (x1, y1) in zip(xy, xy[1:]):
+        gx0, gy0 = to_grid(x0, y0)
+        gx1, gy1 = to_grid(x1, y1)
+        for gx, gy in bresenham_line(gx0, gy0, gx1, gy1):
+            grid[gy][gx] = path_char
+
+    start_x, start_y = to_grid(*xy[0])
+    end_x, end_y = to_grid(*xy[-1])
+    grid[start_y][start_x] = "S"
+    grid[end_y][end_x] = "E"
+
+    return "\n".join("".join(row).rstrip() for row in grid)
+
+
 def time_at_distance(distances: List[float], times: List[Optional[dt.datetime]], target: float) -> Optional[dt.datetime]:
     if not times or any(t is None for t in times):
         return None
@@ -1092,6 +1166,9 @@ def extract_overpass_step_names(
 @click.option("--simplify-tolerance", default=20.0, show_default=True, type=float)
 @click.option("--turn-min-spacing", default=120.0, show_default=True, type=float)
 @click.option("--turn-cluster-radius", default=200.0, show_default=True, type=float)
+@click.option("--ascii/--no-ascii", default=False, show_default=True)
+@click.option("--ascii-width", default=80, show_default=True, type=int)
+@click.option("--ascii-height", default=25, show_default=True, type=int)
 @click.option("--obsidian", is_flag=True, help="Wrap quoted labels in [[...]] for Obsidian.")
 @click.option("--output", type=click.Path(dir_okay=False, path_type=Path))
 def main(
@@ -1115,6 +1192,9 @@ def main(
     simplify_tolerance: float,
     turn_min_spacing: float,
     turn_cluster_radius: float,
+    ascii: bool,
+    ascii_width: int,
+    ascii_height: int,
     obsidian: bool,
     output: Optional[Path],
 ) -> None:
@@ -1202,11 +1282,13 @@ def main(
 
     events.sort(key=lambda e: e.distance_m)
     output_lines = [format_event(event, raw_distances, times, obsidian) for event in events]
+    content_sections: List[str] = []
+    if ascii:
+        content_sections.append(render_ascii(points, ascii_width, ascii_height))
     if verbosity == "human":
-        summary_line = summarize_track(points, raw_distances, elevation_smooth)
-        content = summary_line + "\n\n" + "\n".join(output_lines)
-    else:
-        content = "\n".join(output_lines)
+        content_sections.append(summarize_track(points, raw_distances, elevation_smooth))
+    content_sections.append("\n".join(output_lines))
+    content = "\n\n".join(section for section in content_sections if section)
     if output:
         output.write_text(content + "\n", encoding="utf-8")
     else:
