@@ -50,7 +50,7 @@ python gpx_to_markdown.py path/to/track.gpx --output summary.md
 - `--ascii-labels` (default: `true`)
 - `--ascii-poi-labels` (default: `true`)
 - `--ascii-label-radius` (default: `2000`)
-- `--obsidian` (default: `false`)
+- `--obsidian` (default: `false`) (also applies to ASCII label legend)
 - `--poi-radius` (default: `100`)
 - `--osrm-max-points` (default: `1000`)
 - `--output` (default: stdout)

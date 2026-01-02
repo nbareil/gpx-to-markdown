@@ -537,6 +537,7 @@ def render_ascii(
     height: int,
     labels: Optional[List[Tuple[float, float, str]]] = None,
     path_char: str = "#",
+    obsidian: bool = False,
 ) -> str:
     if not points:
         return ""
@@ -593,7 +594,11 @@ def render_ascii(
     for row_idx, row in enumerate(grid):
         line = "".join(row).rstrip()
         if row_idx in label_text_by_row:
-            line = f"{line}  " + " | ".join(label_text_by_row[row_idx])
+            legend_items = label_text_by_row[row_idx]
+            if obsidian:
+                legend_items = [obsidianize_labels(f"\"{item}\"").strip('"') for item in legend_items]
+            legend = " | ".join(legend_items)
+            line = f"{line}  {legend}"
         lines.append(line)
     return "\n".join(lines)
 
@@ -1441,7 +1446,7 @@ def main(
                 )
             )
         content_sections.append(
-            render_ascii(points, ascii_width, ascii_height, labels=labels or None)
+            render_ascii(points, ascii_width, ascii_height, labels=labels or None, obsidian=obsidian)
         )
     if verbosity == "human":
         content_sections.append(summarize_track(points, raw_distances, elevation_smooth))
