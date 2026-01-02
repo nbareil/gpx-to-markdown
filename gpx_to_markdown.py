@@ -1145,6 +1145,63 @@ def extract_place_labels(
     return labels
 
 
+def find_nearest_place(
+    lat: float,
+    lon: float,
+    search_radius_m: float,
+    overpass_url: str,
+    overpass_timeout: int = 90,
+    overpass_split: bool = True,
+    debug: bool = False,
+) -> Optional[str]:
+    delta_lat = search_radius_m / M_PER_DEG
+    delta_lon = search_radius_m / (M_PER_DEG * math.cos(math.radians(lat)))
+    bbox = (lat - delta_lat, lon - delta_lon, lat + delta_lat, lon + delta_lon)
+    cache = load_overpass_cache()
+    data = overpass_query(
+        bbox,
+        overpass_url,
+        cache,
+        timeout=overpass_timeout,
+        split_on_fail=overpass_split,
+        debug=debug,
+        include_highways=False,
+        include_pois=True,
+    )
+    if data:
+        save_overpass_cache(cache)
+    if not data:
+        return None
+    best_name = None
+    best_dist = None
+    for element in data.get("elements", []):
+        tags = element.get("tags") or {}
+        if tags.get("place") not in {"city", "town", "village", "hamlet"}:
+            continue
+        name = (tags.get("name") or "").strip()
+        if not name:
+            continue
+        if "lat" in element and "lon" in element:
+            elat = element["lat"]
+            elon = element["lon"]
+        elif "center" in element:
+            elat = element["center"]["lat"]
+            elon = element["center"]["lon"]
+        else:
+            continue
+        dist = haversine_m(lat, lon, elat, elon)
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_name = name
+    return best_name
+
+
+def format_place(name: str, obsidian: bool) -> str:
+    if obsidian:
+        return f"[[{name}]]"
+    return name
+
+
 def extract_poi_labels(
     points: List[TrackPoint],
     label_radius_m: float,
@@ -1448,6 +1505,31 @@ def main(
         content_sections.append(
             render_ascii(points, ascii_width, ascii_height, labels=labels or None, obsidian=obsidian)
         )
+    start_place = find_nearest_place(
+        points[0].lat,
+        points[0].lon,
+        5000.0,
+        overpass_url,
+        overpass_timeout=overpass_timeout,
+        overpass_split=overpass_split,
+        debug=overpass_debug,
+    )
+    end_place = find_nearest_place(
+        points[-1].lat,
+        points[-1].lon,
+        5000.0,
+        overpass_url,
+        overpass_timeout=overpass_timeout,
+        overpass_split=overpass_split,
+        debug=overpass_debug,
+    )
+    place_lines: List[str] = []
+    if start_place:
+        place_lines.append(f"Départ: {format_place(start_place, obsidian)}")
+    if end_place:
+        place_lines.append(f"Arrivée: {format_place(end_place, obsidian)}")
+    if place_lines:
+        content_sections.append("\n".join(place_lines))
     if verbosity == "human":
         content_sections.append(summarize_track(points, raw_distances, elevation_smooth))
     content_sections.append("\n".join(output_lines))
