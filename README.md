@@ -48,6 +48,7 @@ python gpx_to_markdown.py path/to/track.gpx --output summary.md
 - `--ascii-width` (default: `80`)
 - `--ascii-height` (default: `25`)
 - `--ascii-labels` (default: `true`)
+- `--ascii-poi-labels` (default: `true`)
 - `--ascii-label-radius` (default: `2000`)
 - `--obsidian` (default: `false`)
 - `--poi-radius` (default: `100`)

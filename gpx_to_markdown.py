@@ -1136,6 +1136,62 @@ def extract_place_labels(
     return labels
 
 
+def extract_poi_labels(
+    points: List[TrackPoint],
+    label_radius_m: float,
+    overpass_url: str,
+    overpass_timeout: int = 90,
+    overpass_split: bool = True,
+    debug: bool = False,
+) -> List[Tuple[float, float, str]]:
+    if not points:
+        return []
+    lats = [p.lat for p in points]
+    lons = [p.lon for p in points]
+    mean_lat = sum(lats) / len(lats)
+    delta_lat = label_radius_m / M_PER_DEG
+    delta_lon = label_radius_m / (M_PER_DEG * math.cos(math.radians(mean_lat)))
+    bbox = (min(lats) - delta_lat, min(lons) - delta_lon, max(lats) + delta_lat, max(lons) + delta_lon)
+    cache = load_overpass_cache()
+    data = overpass_query(
+        bbox,
+        overpass_url,
+        cache,
+        timeout=overpass_timeout,
+        split_on_fail=overpass_split,
+        debug=debug,
+        include_highways=False,
+        include_pois=True,
+    )
+    if data:
+        save_overpass_cache(cache)
+    if not data:
+        return []
+    labels: List[Tuple[float, float, str]] = []
+    seen = set()
+    for element in data.get("elements", []):
+        tags = element.get("tags") or {}
+        if not poi_label(tags):
+            continue
+        name = (tags.get("name") or tags.get("ref") or "").strip()
+        if not name:
+            continue
+        if "lat" in element and "lon" in element:
+            lat = element["lat"]
+            lon = element["lon"]
+        elif "center" in element:
+            lat = element["center"]["lat"]
+            lon = element["center"]["lon"]
+        else:
+            continue
+        key = (round(lat, 6), round(lon, 6), name)
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append((lat, lon, name))
+    return labels
+
+
 def extract_overpass_step_names(
     match_polyline: List[Tuple[float, float]],
     match_distances: List[float],
@@ -1237,6 +1293,7 @@ def extract_overpass_step_names(
 @click.option("--ascii-width", default=80, show_default=True, type=int)
 @click.option("--ascii-height", default=25, show_default=True, type=int)
 @click.option("--ascii-labels/--no-ascii-labels", default=True, show_default=True)
+@click.option("--ascii-poi-labels/--no-ascii-poi-labels", default=True, show_default=True)
 @click.option("--ascii-label-radius", default=2000.0, show_default=True, type=float)
 @click.option("--obsidian", is_flag=True, help="Wrap quoted labels in [[...]] for Obsidian.")
 @click.option("--output", type=click.Path(dir_okay=False, path_type=Path))
@@ -1265,6 +1322,7 @@ def main(
     ascii_width: int,
     ascii_height: int,
     ascii_labels: bool,
+    ascii_poi_labels: bool,
     ascii_label_radius: float,
     obsidian: bool,
     output: Optional[Path],
@@ -1355,17 +1413,32 @@ def main(
     output_lines = [format_event(event, raw_distances, times, obsidian) for event in events]
     content_sections: List[str] = []
     if ascii:
-        labels = None
+        labels = []
         if ascii_labels:
-            labels = extract_place_labels(
-                points,
-                ascii_label_radius,
-                overpass_url,
-                overpass_timeout=overpass_timeout,
-                overpass_split=overpass_split,
-                debug=overpass_debug,
+            labels.extend(
+                extract_place_labels(
+                    points,
+                    ascii_label_radius,
+                    overpass_url,
+                    overpass_timeout=overpass_timeout,
+                    overpass_split=overpass_split,
+                    debug=overpass_debug,
+                )
             )
-        content_sections.append(render_ascii(points, ascii_width, ascii_height, labels=labels))
+        if ascii_poi_labels:
+            labels.extend(
+                extract_poi_labels(
+                    points,
+                    ascii_label_radius,
+                    overpass_url,
+                    overpass_timeout=overpass_timeout,
+                    overpass_split=overpass_split,
+                    debug=overpass_debug,
+                )
+            )
+        content_sections.append(
+            render_ascii(points, ascii_width, ascii_height, labels=labels or None)
+        )
     if verbosity == "human":
         content_sections.append(summarize_track(points, raw_distances, elevation_smooth))
     content_sections.append("\n".join(output_lines))
