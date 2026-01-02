@@ -584,14 +584,10 @@ def render_ascii(
 
     label_text_by_row: Dict[int, List[str]] = {}
     if labels:
-        for idx, (lat, lon, name) in enumerate(labels, start=1):
-            gx, gy = to_grid(*to_xy(lat, lon, origin_lat))
+        for lat, lon, name in labels:
+            _, gy = to_grid(*to_xy(lat, lon, origin_lat))
             if 0 <= gy < height:
-                idx_text = str(idx)
-                for offset, ch in enumerate(idx_text):
-                    if 0 <= gx + offset < width:
-                        grid[gy][gx + offset] = ch
-                label_text_by_row.setdefault(gy, []).append(f"{idx}: {name}")
+                label_text_by_row.setdefault(gy, []).append(name)
 
     lines: List[str] = []
     for row_idx, row in enumerate(grid):
