@@ -43,6 +43,7 @@ python gpx_to_markdown.py path/to/track.gpx --output summary.md
 - `--simplify-tolerance` (default: `20`)
 - `--turn-min-spacing` (default: `120`)
 - `--turn-cluster-radius` (default: `200`)
+- `--obsidian` (default: `false`)
 - `--poi-radius` (default: `100`)
 - `--osrm-max-points` (default: `1000`)
 - `--output` (default: stdout)

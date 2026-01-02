@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -664,7 +665,12 @@ def filter_turn_events(events: List[Event], min_spacing_m: float) -> List[Event]
     return filtered
 
 
-def format_event(event: Event, total_distances: List[float], times: List[Optional[dt.datetime]]) -> str:
+def format_event(
+    event: Event,
+    total_distances: List[float],
+    times: List[Optional[dt.datetime]],
+    obsidian: bool,
+) -> str:
     if event.range_start_m is not None and event.range_end_m is not None:
         km_label = f"km {format_km(event.range_start_m)}–{format_km(event.range_end_m)}"
         time_label = format_time_range(event.time_start, event.time_end)
@@ -674,9 +680,22 @@ def format_event(event: Event, total_distances: List[float], times: List[Optiona
             time_label = format_time_range(event.time_start, event.time_end)
         else:
             time_label = format_time(time_at_distance(total_distances, times, event.distance_m))
+    description = obsidianize_labels(event.description) if obsidian else event.description
     if time_label:
-        return f"- [{km_label} | {time_label}] {event.description}"
-    return f"- [{km_label}] {event.description}"
+        return f"- [{km_label} | {time_label}] {description}"
+    return f"- [{km_label}] {description}"
+
+
+def obsidianize_labels(text: str) -> str:
+    def replace(match: re.Match) -> str:
+        label = match.group(1).strip()
+        if not label:
+            return match.group(0)
+        if label.startswith("[[") and label.endswith("]]"):
+            return label
+        return f"[[{label}]]"
+
+    return re.sub(r'"([^"]+)"', replace, text)
 
 
 def overpass_cache_path() -> Path:
@@ -1073,6 +1092,7 @@ def extract_overpass_step_names(
 @click.option("--simplify-tolerance", default=20.0, show_default=True, type=float)
 @click.option("--turn-min-spacing", default=120.0, show_default=True, type=float)
 @click.option("--turn-cluster-radius", default=200.0, show_default=True, type=float)
+@click.option("--obsidian", is_flag=True, help="Wrap quoted labels in [[...]] for Obsidian.")
 @click.option("--output", type=click.Path(dir_okay=False, path_type=Path))
 def main(
     gpx_path: Path,
@@ -1095,6 +1115,7 @@ def main(
     simplify_tolerance: float,
     turn_min_spacing: float,
     turn_cluster_radius: float,
+    obsidian: bool,
     output: Optional[Path],
 ) -> None:
     points = load_gpx_points(gpx_path)
@@ -1180,7 +1201,7 @@ def main(
         events.append(Event(distance_m=scaled_position, description=description))
 
     events.sort(key=lambda e: e.distance_m)
-    output_lines = [format_event(event, raw_distances, times) for event in events]
+    output_lines = [format_event(event, raw_distances, times, obsidian) for event in events]
     if verbosity == "human":
         summary_line = summarize_track(points, raw_distances, elevation_smooth)
         content = summary_line + "\n\n" + "\n".join(output_lines)
