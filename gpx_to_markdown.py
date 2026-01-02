@@ -582,16 +582,24 @@ def render_ascii(
     grid[start_y][start_x] = "S"
     grid[end_y][end_x] = "E"
 
+    label_text_by_row: Dict[int, List[str]] = {}
     if labels:
-        for lat, lon, name in labels:
+        for idx, (lat, lon, name) in enumerate(labels, start=1):
             gx, gy = to_grid(*to_xy(lat, lon, origin_lat))
             if 0 <= gy < height:
-                label = name[: width - gx]
-                for offset, ch in enumerate(label):
+                idx_text = str(idx)
+                for offset, ch in enumerate(idx_text):
                     if 0 <= gx + offset < width:
                         grid[gy][gx + offset] = ch
+                label_text_by_row.setdefault(gy, []).append(f"{idx}: {name}")
 
-    return "\n".join("".join(row).rstrip() for row in grid)
+    lines: List[str] = []
+    for row_idx, row in enumerate(grid):
+        line = "".join(row).rstrip()
+        if row_idx in label_text_by_row:
+            line = f"{line}  " + " | ".join(label_text_by_row[row_idx])
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def time_at_distance(distances: List[float], times: List[Optional[dt.datetime]], target: float) -> Optional[dt.datetime]:

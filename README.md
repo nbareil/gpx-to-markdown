@@ -7,7 +7,7 @@ Convert a mountain bike GPX track into French Markdown artifacts (summary, turns
 - OSRM map matching for road/trail names
 - POI enrichment from OSM (villages, peaks, churches, rivers, lakes, forests, windmills, power lines, rails, bridges, tunnels, roads, fields)
 - Human-friendly summary mode (polyline simplification + turn clustering)
-- Optional ASCII renderer for the track
+- Optional ASCII renderer for the track (numbers + right-side legend for labels)
 - Turn detection (angle > 80°)
 - Climb detection (>= 4% grade, estimated duration > 3 minutes at 8 km/h)
 - Pause detection (speed ~0 for > 5 minutes)
